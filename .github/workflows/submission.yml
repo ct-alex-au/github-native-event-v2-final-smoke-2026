@@ -1,0 +1,72 @@
+name: Submission validation
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'requests/submissions/*/request.json'
+      - 'requests/submissions/*/bundle'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: submission / intake
+    if: github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted base workflow
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - id: eventctl
+        name: Resolve pinned eventctl
+        uses: ./.github/actions/eventctl
+        with:
+          test-bin: ${{ env.EVENTCTL_E2E_BIN }}
+
+      - name: Verify the signed submission against protected state
+        env:
+          EVENTCTL: ${{ steps.eventctl.outputs.path }}
+          GH_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY: ${{ github.repository }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          EVENT_SOURCE_TIME: ${{ github.event.pull_request.created_at }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          paths="$RUNNER_TEMP/changed-paths"
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${EVENT_REPOSITORY}/pulls/${EVENT_PR_NUMBER}/files?per_page=100" \
+            --jq '.[].filename' > "$paths"
+          test "$(wc -l < "$paths" | tr -d ' ')" = 2
+          request_path=$(grep -E '^requests/submissions/[0-9a-f-]+/request\.json$' "$paths")
+          bundle_path=$(grep -E '^requests/submissions/[0-9a-f-]+/bundle$' "$paths")
+          request_dir=${request_path%/request.json}
+          test "$bundle_path" = "$request_dir/bundle"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${EVENT_REPOSITORY}/contents/${request_path}?ref=${EVENT_HEAD_SHA}" \
+            > "$RUNNER_TEMP/request.json"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${EVENT_REPOSITORY}/contents/${bundle_path}?ref=${EVENT_HEAD_SHA}" \
+            > "$RUNNER_TEMP/bundle"
+          gh api -H 'Accept: application/vnd.github.raw+json' \
+            "repos/${EVENT_REPOSITORY}/contents/registry/state.json?ref=registry" \
+            > "$RUNNER_TEMP/registry.json"
+          "$EVENTCTL" submission verify \
+            --event event/binding.json \
+            --registry "$RUNNER_TEMP/registry.json" \
+            --request "$RUNNER_TEMP/request.json" \
+            --bundle "$RUNNER_TEMP/bundle" \
+            --expect-actor-id "$EVENT_AUTHOR_ID" \
+            --source-time "$EVENT_SOURCE_TIME" \
+            --output "$RUNNER_TEMP/verified-submission.json"
+          printf '%s\n' 'submission request is signed, actor-bound, active-team-bound, and available'

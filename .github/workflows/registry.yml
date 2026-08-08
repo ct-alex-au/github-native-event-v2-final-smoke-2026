@@ -1,0 +1,41 @@
+name: Registry state validation
+
+on:
+  push:
+    branches: [registry]
+  pull_request:
+    branches: [registry]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: registry / canonical-state
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the proposed registry revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Check out trusted public event policy
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          path: main
+          persist-credentials: false
+
+      - id: eventctl
+        name: Resolve pinned eventctl
+        uses: ./.github/actions/eventctl
+        with:
+          test-bin: ${{ env.EVENTCTL_E2E_BIN }}
+
+      - name: Validate one authoritative registry document
+        env:
+          EVENTCTL: ${{ steps.eventctl.outputs.path }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$EVENTCTL" doctor --event main/event/binding.json --registry registry/state.json
